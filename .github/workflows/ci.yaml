@@ -38,7 +38,7 @@ jobs:
           version: ${{ env.RUFF_VERSION }}
           args: format --check
 
-  test:
+  test-python:
     name: Test (Python ${{ matrix.python-version }})
     runs-on: ${{ matrix.os }}
     timeout-minutes: 15
@@ -75,3 +75,15 @@ jobs:
       # fails fast instead of holding the runner until the job timeout.
       - name: Test
         run: python -m pytest -q --timeout 300
+
+  # Branch rules require a check named "Test". This job reports it once every
+  # Python version above has passed, so the matrix can grow without renaming it.
+  test:
+    name: Test
+    needs: test-python
+    if: always()
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - name: All Python versions passed
+        run: test "${{ needs.test-python.result }}" = "success"
