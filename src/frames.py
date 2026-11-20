@@ -8,6 +8,7 @@ before ``world``.
 from __future__ import annotations
 
 import asyncio
+import math
 from typing import Any, Optional, Sequence, Tuple
 
 import numpy as np
@@ -16,37 +17,54 @@ WORLD_FRAME = "world"
 FRAME_SYSTEM_TIMEOUT_S = 5.0
 
 
+# Within this distance of +/-Z (after normalising), RDK measures theta as if
+# the longitude were 0. Same constant as RDK's orientationVectorPoleRadius.
+_ORIENTATION_VECTOR_POLE_RADIUS = 1e-4
+
+
+def _rotation_z(angle_rad: float) -> np.ndarray:
+    c, s = math.cos(angle_rad), math.sin(angle_rad)
+    return np.array([[c, -s, 0.0], [s, c, 0.0], [0.0, 0.0, 1.0]], dtype=float)
+
+
+def _rotation_y(angle_rad: float) -> np.ndarray:
+    c, s = math.cos(angle_rad), math.sin(angle_rad)
+    return np.array([[c, 0.0, s], [0.0, 1.0, 0.0], [-s, 0.0, c]], dtype=float)
+
+
+def orientation_vector_to_rotation_matrix(o_x: float, o_y: float, o_z: float, theta_deg: float) -> np.ndarray:
+    """3×3 rotation for a Viam orientation vector, ``theta`` in degrees as in the proto.
+
+    A port of RDK's ``OrientationVector.Quaternion`` (spatialmath/orientationVector.go):
+    the vector is the child's +Z axis, and the rotation is ``Rz(lon) Ry(lat) Rz(theta)``
+    with ``lat = acos(oz)`` and ``lon = atan2(oy, ox)``. Near a pole RDK measures theta
+    as if lon were 0, so theta is shifted by lon there. A zero vector means +Z.
+
+    This deliberately avoids ``viam.spatialmath``: that module only exists in
+    viam-sdk releases that need Python 3.10+, and Python 3.8 machines (Jetson
+    JetPack 5) get viam-sdk 0.72, which doesn't have it.
+    """
+    vector = np.array([float(o_x), float(o_y), float(o_z)], dtype=float)
+    norm = float(np.linalg.norm(vector))
+    if norm == 0.0:
+        vector = np.array([0.0, 0.0, 1.0])
+    else:
+        vector /= norm
+    ox, oy, oz = (float(v) for v in vector)
+    pole = 1.0 - abs(oz) <= _ORIENTATION_VECTOR_POLE_RADIUS
+
+    lat = math.acos(max(-1.0, min(1.0, oz)))
+    lon = math.atan2(oy, ox)
+    theta = math.radians(float(theta_deg))
+    if pole:
+        theta = theta - lon if oz > 0 else theta + lon
+    return _rotation_z(lon) @ _rotation_y(lat) @ _rotation_z(theta)
+
+
 def _pose_to_matrix(pose) -> np.ndarray:
     """4×4 pose of a child in its parent, translation in millimetres."""
-    from viam.proto.common import Orientation
-    from viam.spatialmath import OrientationVector
-
-    ov = OrientationVector.from_proto(
-        Orientation(
-            o_x=float(pose.o_x),
-            o_y=float(pose.o_y),
-            o_z=float(pose.o_z),
-            theta=float(pose.theta),
-        )
-    )
-    # ``elements`` is a 9-vector whose row/column order depends on the
-    # installed viam-sdk. The orientation vector itself is the child's +Z
-    # axis, so pick the layout that sends +Z there. The other one mirrors a
-    # forward depth cloud behind the robot and a reverse command hits it.
-    elements = np.asarray(ov.to_quaternion().to_rotation_matrix().elements, dtype=float)
-    candidates = (
-        elements.reshape((3, 3), order="C"),
-        elements.reshape((3, 3), order="F"),
-    )
-    z_axis = np.array([float(pose.o_x), float(pose.o_y), float(pose.o_z)], dtype=float)
-    norm = float(np.linalg.norm(z_axis))
-    if norm < 1e-9:
-        rotation = candidates[1]
-    else:
-        z_axis /= norm
-        rotation = max(candidates, key=lambda matrix: float(matrix[:, 2] @ z_axis))
     transform = np.eye(4, dtype=float)
-    transform[:3, :3] = rotation
+    transform[:3, :3] = orientation_vector_to_rotation_matrix(pose.o_x, pose.o_y, pose.o_z, pose.theta)
     transform[0, 3] = float(pose.x)
     transform[1, 3] = float(pose.y)
     transform[2, 3] = float(pose.z)
