@@ -39,18 +39,29 @@ jobs:
           args: format --check
 
   test:
-    name: Test
-    runs-on: ubuntu-24.04
+    name: Test (Python ${{ matrix.python-version }})
+    runs-on: ${{ matrix.os }}
     timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # 3.11 is the Python that Raspberry Pi OS Bookworm ships.
+          - python-version: '3.11'
+            os: ubuntu-24.04
+          # 3.8 is the Python that Jetson JetPack 5 (Ubuntu 20.04) ships. pip gives it viam-sdk 0.72,
+          # an older numpy and no viam.spatialmath, so a newer-SDK-only import breaks here first.
+          # setup-python only publishes 3.8 for ubuntu-22.04 and older.
+          - python-version: '3.8'
+            os: ubuntu-22.04
     steps:
       # actions/checkout@v7.0.1
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
 
-      # 3.11 is the Python that Raspberry Pi OS Bookworm ships.
       # actions/setup-python@v7.0.0
       - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97
         with:
-          python-version: '3.11'
+          python-version: ${{ matrix.python-version }}
           cache: pip
 
       - name: Install dependencies
