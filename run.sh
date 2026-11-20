@@ -4,6 +4,15 @@ set -euo pipefail
 
 cd "$(dirname "$0")"
 
+# viam-server runs setup.sh once (first_run) and records that outside the module
+# directory. A reload module is re-extracted on every viam-server start, which
+# deletes .venv but keeps that record, so first_run never runs again. Rebuild the
+# venv here when it is missing or setup did not finish.
+if [ ! -f .venv/.setup-complete ]; then
+    echo "[avoidance-base] virtualenv missing or incomplete; running setup.sh" >&2
+    ./setup.sh >&2
+fi
+
 # shellcheck disable=SC1091
 source .venv/bin/activate
 
