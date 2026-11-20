@@ -12,7 +12,7 @@ from viam.proto.app.robot import ComponentConfig
 from viam.utils import dict_to_struct
 
 from src.avoidance_base import AvoidanceBase, ObstacleStop
-from src.guard import GuardConfig
+from src.guard import GuardConfig, Twist
 
 
 class _Child:
@@ -170,3 +170,43 @@ def test_avoidance_status_is_not_forwarded():
         assert child.stopped == 0
 
     asyncio.run(_run())
+
+
+def test_decision_changes_are_logged_once(monkeypatch):
+    import src.avoidance_base as module
+
+    lines: list[str] = []
+    monkeypatch.setattr(module.LOGGER, "info", lambda fmt, *args: lines.append(fmt % args))
+    monkeypatch.setattr(module, "DECISION_LOG_MIN_INTERVAL_S", 0.0)
+
+    base, _child = _ready(np.array([[0.0, 0.85]]))
+    forward = Twist(vy_mps=1.0)
+    # Idle: nothing logged.
+    base._evaluate(Twist())
+    assert lines == []
+    # Obstacle ahead: slows, and logs once however many ticks it stays slow.
+    base._evaluate(forward)
+    base._evaluate(forward)
+    assert len(lines) == 1
+    assert lines[0].startswith("avoidance 'avoid' slow: obstacle ")
+    assert "1.00 -> " in lines[0]
+    # Obstacle inside the stop zone.
+    base._clouds["cam"] = (time.monotonic(), np.array([[0.0, 0.32]]))
+    base._evaluate(forward)
+    assert lines[-1].startswith("avoidance 'avoid' stop: obstacle ")
+    # Path clears.
+    base._clouds["cam"] = (time.monotonic(), np.empty((0, 2)))
+    base._evaluate(forward)
+    assert lines[-1] == "avoidance 'avoid' clear: no obstacle in path, 1.00 -> 1.00 m/s"
+    assert len(lines) == 3
+
+
+def test_blind_stop_is_not_logged_as_a_decision(monkeypatch):
+    import src.avoidance_base as module
+
+    lines: list[str] = []
+    monkeypatch.setattr(module.LOGGER, "info", lambda fmt, *args: lines.append(fmt % args))
+    base, _child = _ready(np.empty((0, 2)))
+    base._clouds["cam"] = (time.monotonic() - 5.0, np.empty((0, 2)))
+    assert base._evaluate(Twist(vy_mps=1.0)).action == "stop"
+    assert lines == []

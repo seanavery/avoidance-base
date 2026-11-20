@@ -38,6 +38,10 @@ from .runtime import get_parent_robot
 
 LOGGER = getLogger(__name__)
 
+# Decision changes (clear / slow / stop) are logged at info. Flapping between
+# clear and slow is limited to one line per interval; entering stop always logs.
+DECISION_LOG_MIN_INTERVAL_S = 0.5
+
 DEFAULT_TIME_TO_COLLISION_S = 2.0
 DEFAULT_STOP_GAP_M = 0.04
 DEFAULT_PADDING_M = 0.05
@@ -58,6 +62,19 @@ GUARD_MAX_POINTS = 2000
 
 class ObstacleStop(RuntimeError):
     """A straight move or spin was cut short because an obstacle was too close."""
+
+
+def describe_decision(requested: Twist, result: GuardResult) -> str:
+    """One line for a guard decision, e.g. ``slow: obstacle 0.82 m away, 0.30 -> 0.18 m/s``."""
+    free = "no obstacle in path" if math.isinf(result.free_m) else f"obstacle {result.free_m:.2f} m away"
+    asked = requested.planar_speed
+    allowed = result.twist.planar_speed
+    asked_yaw = abs(math.degrees(requested.wz_rad_s))
+    allowed_yaw = abs(math.degrees(result.twist.wz_rad_s))
+    speeds = f"{asked:.2f} -> {allowed:.2f} m/s"
+    if asked < 1e-4 and asked_yaw >= 1e-4:
+        speeds = f"{asked_yaw:.0f} -> {allowed_yaw:.0f} deg/s"
+    return f"{result.action}: {free}, {speeds}"
 
 
 class AvoidanceBase(Base):
@@ -98,6 +115,8 @@ class AvoidanceBase(Base):
         self._last_key: Optional[Tuple[float, float, float]] = None
         self._block_reason = ""
         self._last_result = GuardResult(Twist(), "stop", 0.0)
+        self._logged_action = ""
+        self._logged_at = 0.0
         self._closed = False
 
     @classmethod
@@ -403,7 +422,29 @@ class AvoidanceBase(Base):
             self._block_reason = ""
         result = decide(twist, points, self._guard, frames_ok=self._frames_ok, stale=stale)
         self._last_result = result
+        self._log_decision(twist, result, blind=stale or not self._frames_ok)
         return result
+
+    def _log_decision(self, requested: Twist, result: GuardResult, *, blind: bool) -> None:
+        """Log at info when the action changes, so a walk shows clear -> slow -> stop.
+
+        A zero command is idle and not logged. A stop because the module can't see
+        is already logged as "holding motion", so it only updates the state here.
+        """
+        now = time.monotonic()
+        if requested.planar_speed < 1e-4 and abs(requested.wz_rad_s) < 1e-4:
+            # No motion asked for: stay quiet, and let the next real command log.
+            self._logged_action = "idle"
+            return
+        if result.action == self._logged_action:
+            return
+        if blind:
+            self._logged_action, self._logged_at = result.action, now
+            return
+        if result.action != "stop" and now - self._logged_at < DECISION_LOG_MIN_INTERVAL_S:
+            return
+        LOGGER.info("avoidance %r %s", self.name, describe_decision(requested, result))
+        self._logged_action, self._logged_at = result.action, now
 
     def _stale_reason(self) -> str:
         now = time.monotonic()
