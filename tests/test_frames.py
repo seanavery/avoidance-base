@@ -2,8 +2,10 @@
 
 from __future__ import annotations
 
+import ast
 import importlib
 import math
+import pathlib
 import sys
 
 import numpy as np
@@ -93,18 +95,53 @@ def _rz(deg: float) -> np.ndarray:
     return np.array([[c, -s, 0.0], [s, c, 0.0], [0.0, 0.0, 1.0]])
 
 
+def _rx(deg: float) -> np.ndarray:
+    c, s = math.cos(math.radians(deg)), math.sin(math.radians(deg))
+    return np.array([[1.0, 0.0, 0.0], [0.0, c, -s], [0.0, s, c]])
+
+
+def _ry(deg: float) -> np.ndarray:
+    c, s = math.cos(math.radians(deg)), math.sin(math.radians(deg))
+    return np.array([[c, 0.0, s], [0.0, 1.0, 0.0], [-s, 0.0, c]])
+
+
+def test_orientation_vector_ninety_degrees_about_each_axis():
+    # The orientation vector is where the child's +Z points; theta then spins about it.
+    np.testing.assert_allclose(orientation_vector_to_rotation_matrix(0, -1, 0, 90), _rx(90), atol=1e-12)
+    np.testing.assert_allclose(orientation_vector_to_rotation_matrix(1, 0, 0, 0), _ry(90), atol=1e-12)
+    np.testing.assert_allclose(orientation_vector_to_rotation_matrix(0, 0, 1, 90), _rz(90), atol=1e-12)
+
+
+def test_readme_camera_optical_example():
+    # README: ov (x=0, y=-1, z=0, th=90). That is 90 degrees about +X: optical +X stays right, and
+    # optical +Z (forward) points along base -Y.
+    rotation = orientation_vector_to_rotation_matrix(0, -1, 0, 90)
+    np.testing.assert_allclose(rotation, _rx(90), atol=1e-12)
+    np.testing.assert_allclose(rotation @ [1.0, 0.0, 0.0], [1.0, 0.0, 0.0], atol=1e-12)
+    np.testing.assert_allclose(rotation @ [0.0, 0.0, 1.0], [0.0, -1.0, 0.0], atol=1e-12)
+
+
+def test_no_module_imports_viam_spatialmath():
+    # viam.spatialmath needs viam-sdk releases that require Python 3.10+; Python 3.8 machines get
+    # viam-sdk 0.72 without it. Keep it out of the module, including lazy imports inside functions.
+    offenders = []
+    for path in sorted(pathlib.Path(__file__).resolve().parents[1].joinpath("src").glob("*.py")):
+        for node in ast.walk(ast.parse(path.read_text(), str(path))):
+            if isinstance(node, ast.ImportFrom):
+                names = [node.module or ""] + [f"{node.module}.{alias.name}" for alias in node.names]
+            elif isinstance(node, ast.Import):
+                names = [alias.name for alias in node.names]
+            else:
+                continue
+            if any(name == "viam.spatialmath" or name.startswith("viam.spatialmath.") for name in names):
+                offenders.append(f"{path.name}:{node.lineno}")
+    assert offenders == [], f"viam.spatialmath imported at {offenders}"
+
+
 def test_orientation_vector_known_rotations():
     np.testing.assert_allclose(orientation_vector_to_rotation_matrix(0, 0, 1, 0), np.eye(3), atol=1e-12)
     # A zero vector means +Z, as in RDK.
     np.testing.assert_allclose(orientation_vector_to_rotation_matrix(0, 0, 0, 0), np.eye(3), atol=1e-12)
-    # Theta spins about the vector, in degrees.
-    np.testing.assert_allclose(orientation_vector_to_rotation_matrix(0, 0, 1, 90), _rz(90), atol=1e-12)
-    # +Z tipped onto +X is a 90 degree turn about +Y.
-    np.testing.assert_allclose(
-        orientation_vector_to_rotation_matrix(1, 0, 0, 0),
-        [[0, 0, 1], [0, 1, 0], [-1, 0, 0]],
-        atol=1e-12,
-    )
     # Camera-optical mount used on the live carts, ov (0, 1, 0, -90): optical +X right stays right,
     # +Y down stays down, +Z forward lands on base +Y forward.
     np.testing.assert_allclose(
